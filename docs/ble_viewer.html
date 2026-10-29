@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BikeFinder 找车</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:#0f1115; color:#e6e8ec;
+         font-family:system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif;
+         max-width:520px; margin:0 auto; }
+  h1 { font-size:22px; margin:4px 0 2px; }
+  .sub { font-size:12.5px; color:#8a919e; margin-bottom:14px; line-height:1.6; }
+  section { background:#171a21; border-radius:14px; padding:14px; margin-bottom:12px; }
+  section h2 { font-size:14px; margin:0 0 10px; color:#9fb3c8; font-weight:600; }
+  button { font-size:15px; padding:12px 14px; margin:3px; border:0; border-radius:10px;
+           background:#2b6cb0; color:#fff; cursor:pointer; min-width:88px; }
+  button:disabled { background:#262b35; color:#5a6270; cursor:not-allowed; }
+  button.primary { background:#1f8a5b; }
+  button.alt { background:#3a4250; }
+  #state { font-size:13px; color:#8a919e; min-height:18px; margin-top:8px; }
+  #state.ok { color:#57d68c; }
+  #state.err { color:#e06c75; }
+  #img { width:100%; border-radius:10px; background:#000; display:none; }
+  #dl { display:none; margin-top:10px; }
+  #dl a { color:#57a6f5; font-size:14px; text-decoration:none; }
+  details { background:#171a21; border-radius:14px; padding:12px 14px; margin-bottom:12px; }
+  summary { font-size:13.5px; color:#9fb3c8; cursor:pointer; }
+  #log { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:#8ec07c;
+         white-space:pre-wrap; text-align:left; margin-top:8px; max-height:200px; overflow:auto; }
+  .help { font-size:12.5px; color:#8a919e; line-height:1.8; margin-top:8px; }
+  .help b { color:#d7dce3; }
+  .warn { color:#e5a50a; }
+</style>
+</head>
+<body>
+
+<h1>🚲 BikeFinder 找车</h1>
+<div class="sub">靠近自行车 → 连接 → 拍一张，确认"就是我的车"。<br>
+手机不用连 ESP32 的热点，照片走蓝牙。</div>
+
+<section>
+  <h2>① 连接</h2>
+  <button id="btnConn" class="primary">连接 BikeFinder</button>
+  <div id="state">未连接</div>
+</section>
+
+<section>
+  <h2>② 拍照确认</h2>
+  <button id="b320" disabled>QVGA · 最快</button>
+  <button id="b640" disabled>VGA · 推荐</button>
+  <button id="b800" disabled>SVGA · 清晰</button>
+  <div id="prog"></div>
+</section>
+
+<img id="img" alt="照片">
+<div id="dl"><a download="bikefinder.jpg">⬇ 保存原图</a></div>
+
+<details>
+  <summary>运行日志</summary>
+  <div id="log"></div>
+  <button id="btnCopy" class="alt">复制日志</button>
+</details>
+
+<details>
+  <summary>使用说明 / 连不上看这里</summary>
+  <div class="help">
+    <b>浏览器</b>：Android 的 <b>Chrome / Edge / 三星浏览器</b>（自带浏览器、iOS Safari 不支持）。<br>
+    <b>页面必须 HTTPS</b>（或 localhost）才能用蓝牙：
+    ① 把本页放到任意 HTTPS 静态托管（GitHub Pages 等）；或<br>
+    ② 电脑跑 <b>python -m http.server 8000</b>，手机 Edge 访问
+    <b>http://电脑IP:8000/ble_viewer.html</b>，并在 Edge 打开
+    <b>edge://flags/#unsafely-treat-insecure-origin-as-secure</b> 把该源加进白名单。<br>
+    <b>连接前</b>：先在 nRF Connect 等 App 里<b>断开</b>——BLE 设备一次只能连一个终端，被占用时这里搜不到。<br>
+    <b>速度</b>：Android 通常协商 MTU 517（约 0.5 秒一张）；Windows 可能卡在 MTU 23（约 10 秒），属正常。<br>
+    <b>提示</b>：不需要配对（pair），直接连接即可。
+  </div>
+</details>
+
+<script>
+const SVC  = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CTRL = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const DATA = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const INFO = '6e400004-b5a3-f393-e0a9-e50e24dcca9e';
+
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let ctrl, data, info, device, server, imgUrl;
+
+function log(s) {
+  $('log').textContent += '\n' + s;
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function setState(t, cls) {
+  const el = $('state');
+  el.textContent = t;
+  el.className = cls || '';
+}
+function setBusy(b) {
+  ['b320','b640','b800'].forEach(i => $(i).disabled = b || !ctrl);
+}
+
+// ---- 环境自检 ----
+(function diagnose() {
+  const bad = [];
+  if (!window.isSecureContext)
+    bad.push('当前不是安全上下文（' + location.protocol + '）→ 蓝牙被禁用。需要 https:// 或 localhost，见"使用说明"');
+  if (!navigator.bluetooth)
+    bad.push('此浏览器没有 Web Bluetooth → 换 Android 的 Chrome / Edge / 三星浏览器');
+  if (bad.length) {
+    for (const b of bad) log('!!! ' + b);
+    $('btnConn').disabled = true;
+    setState('环境不支持', 'err');
+  } else {
+    log('环境检查通过。');
+  }
+})();
+
+// ---- ① 连接 ----
+$('btnConn').onclick = async () => {
+  try {
+    $('btnConn').disabled = true;
+    setState('正在搜索 BikeFinder ...');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'BikeFinder' }],
+      optionalServices: [SVC]
+    });
+    log('已选择: ' + device.name);
+    device.addEventListener('gattserverdisconnected', () => {
+      log('!! 连接断开');
+      ctrl = data = info = null;
+      setBusy(true);
+      $('btnConn').disabled = false;
+      setState('已断开，点"连接"重试', 'err');
+    });
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    ctrl = await svc.getCharacteristic(CTRL);
+    data = await svc.getCharacteristic(DATA);
+    info = await svc.getCharacteristic(INFO);
+    setBusy(false);
+    setState('已连接：' + device.name, 'ok');
+    log('连接成功。');
+  } catch (e) {
+    log('连接失败: ' + e.message);
+    $('btnConn').disabled = false;
+    setState('连接失败（设备被占用？见使用说明）', 'err');
+  }
+};
+
+// ---- ② 拍照 + 拉取 ----
+async function shoot(sizeKey, label) {
+  if (!ctrl) return;
+  setBusy(true);
+  $('prog').textContent = '拍照中 ...';
+  const t0 = performance.now();
+  try {
+    await ctrl.writeValue(enc.encode('C' + sizeKey));
+
+    // 轮询 INFO：固件拍照期间 state=2，拍完 state=1
+    let total = 0, w = 0, h = 0, state = -1, maxLen = 0, mtu = 0;
+    let ok = false;
+    for (let i = 0; i < 40; i++) {
+      await sleep(150);
+      const f = dec.decode(await info.readValue()).trim().split(',');
+      state = parseInt(f[3], 10);
+      if (state === 1) { total=+f[0]; w=+f[1]; h=+f[2]; maxLen=+f[4]; mtu=+f[5]; ok = true; break; }
+      if (state === 3) throw new Error('拍照失败（固件返回 state=3）');
+    }
+    if (!ok) throw new Error('等待拍照结果超时');
+    log(label + ': ' + w + 'x' + h + ', ' + total + ' B, MTU=' + mtu + ', 历史最大 ' + maxLen + ' B');
+
+    // 逐块拉取（按实际收到长度累加，MTU 无关）
+    const parts = [];
+    let off = 0;
+    while (off < total) {
+      await ctrl.writeValue(enc.encode('O' + off));
+      const dv = await data.readValue();
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (b.length === 0) break;
+      parts.push(b);
+      off += b.length;
+      if (parts.length % 5 === 0 || off >= total)
+        $('prog').textContent = '接收中 ' + off + '/' + total + ' (' + Math.round(off*100/total) + '%)';
+    }
+    if (off < total) throw new Error('接收不完整: ' + off + '/' + total);
+
+    const out = new Uint8Array(off);
+    let p = 0;
+    for (const b of parts) { out.set(b, p); p += b.length; }
+    const isJpeg = out[0] === 0xFF && out[1] === 0xD8;
+    const ms = Math.round(performance.now() - t0);
+    log('完成: ' + ms + ' ms, ' + (off/1024/(ms/1000)).toFixed(1) + ' KB/s, JPEG ' + (isJpeg ? '✔' : '✘'));
+    if (!isJpeg) throw new Error('JPEG 头异常');
+
+    if (imgUrl) URL.revokeObjectURL(imgUrl);
+    imgUrl = URL.createObjectURL(new Blob([out], { type: 'image/jpeg' }));
+    $('img').src = imgUrl;
+    $('img').style.display = 'block';
+    $('dl').style.display = 'block';
+    $('dl').querySelector('a').href = imgUrl;
+    $('dl').querySelector('a').download = 'bikefinder_' + w + 'x' + h + '.jpg';
+    $('prog').textContent = '';
+    setState('已获取照片', 'ok');
+  } catch (e) {
+    log('✗ ' + e.message);
+    $('prog').textContent = '';
+    setState('失败：' + e.message, 'err');
+  } finally {
+    setBusy(false);
+  }
+}
+
+$('b320').onclick = () => shoot('320', 'QVGA');
+$('b640').onclick = () => shoot('640', 'VGA');
+$('b800').onclick = () => shoot('800', 'SVGA');
+
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('log').textContent); log('日志已复制'); }
+  catch (e) { log('复制失败，请手动选中'); }
+};
+</script>
+
+</body>
+</html>
