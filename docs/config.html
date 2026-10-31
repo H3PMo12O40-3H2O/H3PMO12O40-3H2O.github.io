@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BikeFinder 网络配置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:#0f1115; color:#e6e8ec;
+         font-family:system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif;
+         max-width:520px; margin:0 auto; }
+  h1 { font-size:20px; margin:4px 0 2px; }
+  .sub { font-size:12.5px; color:#8a919e; margin-bottom:14px; line-height:1.7; }
+  section { background:#171a21; border-radius:14px; padding:14px; margin-bottom:12px; }
+  section h2 { font-size:14px; margin:0 0 10px; color:#9fb3c8; font-weight:600; }
+  button { font-size:15px; padding:12px 16px; margin:3px; border:0; border-radius:10px;
+           background:#2b6cb0; color:#fff; cursor:pointer; }
+  button:disabled { background:#262b35; color:#5a6270; cursor:not-allowed; }
+  button.primary { background:#1f8a5b; }
+  label { display:block; font-size:13px; color:#9fb3c8; margin:10px 0 4px; }
+  input, select { width:100%; font-size:15px; padding:10px; border:1px solid #2c3340;
+                  border-radius:8px; background:#0d1016; color:#e6e8ec; }
+  .hint { font-size:11.5px; color:#8a919e; margin-top:4px; }
+  #state { font-size:13px; color:#8a919e; min-height:18px; margin-top:8px; }
+  #state.ok { color:#57d68c; }
+  #state.err { color:#e06c75; }
+  #log { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:#8ec07c;
+         white-space:pre-wrap; margin-top:8px; max-height:220px; overflow:auto; }
+  .help { font-size:12.5px; color:#8a919e; line-height:1.8; margin-top:8px; }
+  .help b { color:#d7dce3; }
+</style>
+</head>
+<body>
+
+<h1>⚙️ BikeFinder 网络配置</h1>
+<div class="sub">首次开机（或重置后）配置一次，设备记住并自动连网。<br>
+<b>需要 Android Chrome / Edge</b>；首次连接会弹<b>配对</b>请求（Just Works，无 PIN），点允许即可。</div>
+
+<section>
+  <h2>① 连接设备</h2>
+  <button id="btnConn" class="primary">连接 BikeFinder-Config</button>
+  <div id="state">未连接</div>
+</section>
+
+<section>
+  <h2>② 选择地区与账号</h2>
+  <label>地区方案</label>
+  <select id="region">
+    <option value="PKU">北京大学 · PKU Secure（学号 + 校园网密码）</option>
+    <option value="THU" selected>清华大学 · Tsinghua-Secure（NetID + 802.1x 专用密码）</option>
+    <option value="PSK">自定义普通 WiFi（SSID + 密码）</option>
+  </select>
+
+  <div id="ssidBox" style="display:none">
+    <label>SSID</label>
+    <input id="ssid" placeholder="WiFi 名称">
+  </div>
+
+  <div id="userBox">
+    <label>用户名</label>
+    <input id="user" placeholder="学号 / NetID">
+    <div class="hint" id="userHint"></div>
+  </div>
+
+  <label>密码</label>
+  <input id="pass" type="password" placeholder="802.1x 密码 / WiFi 密码">
+  <div class="hint" id="note"></div>
+
+  <div style="margin-top:14px">
+    <button id="btnSave" class="primary" disabled>保存并重启</button>
+  </div>
+</section>
+
+<details>
+  <summary>设备状态</summary>
+  <div id="log"></div>
+  <button id="btnRef" class="alt">刷新状态</button>
+</details>
+
+<script>
+const SVC = '6e400010-b5a3-f393-e0a9-e50e24dcca9e';
+const W   = '6e400011-b5a3-f393-e0a9-e50e24dcca9e';
+const R   = '6e400012-b5a3-f393-e0a9-e50e24dcca9e';
+
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+let w, r;
+
+const HINTS = {
+  PKU: { user: '学号/工号', note: '密码 = 校园网账号密码（IAAA）' },
+  THU: { user: 'NetID（学号）', note: '⚠️ 802.1x 密码需在 user.tsinghua.edu.cn 单独注册，不是普通上网密码' },
+  PSK: { user: '', note: '普通路由器：输入 SSID 和 WiFi 密码' }
+};
+
+function log(s) { $('log').textContent += '\n' + s; $('log').scrollTop = 9e9; }
+function setState(t, cls) { const el = $('state'); el.textContent = t; el.className = cls || ''; }
+
+// 地区切换 → 显示/隐藏 SSID 框 + 更新提示
+function applyRegion() {
+  const k = $('region').value;
+  $('ssidBox').style.display = (k === 'PSK') ? 'block' : 'none';
+  $('userBox').style.display  = (k === 'PSK') ? 'none'  : 'block';
+  $('userHint').textContent = HINTS[k].user;
+  $('note').textContent = HINTS[k].note;
+}
+$('region').onchange = applyRegion;
+applyRegion();
+
+// 环境自检
+(function () {
+  if (!window.isSecureContext)
+    log('!!! 非安全上下文：需要 https://（GitHub Pages）');
+  if (!navigator.bluetooth)
+    log('!!! 此浏览器不支持 Web Bluetooth → 用 Android Chrome/Edge');
+})();
+
+// ① 连接（首次 GATT 操作会自动触发配对）
+$('btnConn').onclick = async () => {
+  try {
+    $('btnConn').disabled = true;
+    setState('正在扫描 BikeFinder-Config ...');
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'BikeFinder-Config' }],
+      optionalServices: [SVC]
+    });
+    log('已选择: ' + dev.name);
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    w = await svc.getCharacteristic(W);
+    r = await svc.getCharacteristic(R);
+    setState('已连接（已配对？读状态验证）', 'ok');
+    $('btnSave').disabled = false;
+    refresh();
+  } catch (e) {
+    log('连接失败: ' + e.message);
+    setState('连接失败', 'err');
+    $('btnConn').disabled = false;
+  }
+};
+
+async function refresh() {
+  if (!r) return;
+  try {
+    const txt = dec.decode(await r.readValue());
+    log('--- 状态 ---\n' + txt);
+  } catch (e) { log('读状态失败: ' + e.message); }
+}
+$('btnRef').onclick = refresh;
+
+// ② 保存
+$('btnSave').onclick = async () => {
+  if (!w) return;
+  const region = $('region').value;
+  const ssid = $('ssid').value.trim();
+  const user = $('user').value.trim();
+  const pass = $('pass').value;
+  if (region === 'PSK' && !ssid) { log('! PSK 需要 SSID'); return; }
+  if (!user && region !== 'PSK') { log('! 需要用户名'); return; }
+  if (!pass) { log('! 需要密码'); return; }
+
+  try {
+    $('btnSave').disabled = true;
+    await w.writeValue(enc.encode('REGION=' + region));
+    if (ssid)  await w.writeValue(enc.encode('SSID=' + ssid));
+    if (user)  await w.writeValue(enc.encode('USER=' + user));
+    await w.writeValue(enc.encode('PASS=' + pass));
+    await w.writeValue(enc.encode('SAVE'));
+    await refresh();
+    setState('已发送保存命令，设备重启中…', 'ok');
+    log('设备将重启并连网；之后手机连校园网访问 bikefinder.local 即可');
+  } catch (e) {
+    log('写入失败（配对？）: ' + e.message);
+    setState('写入失败：请确认已配对', 'err');
+    $('btnSave').disabled = false;
+  }
+};
+</script>
+
+</body>
+</html>
