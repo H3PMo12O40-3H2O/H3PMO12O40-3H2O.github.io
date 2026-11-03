@@ -18,24 +18,25 @@
            background:#2b6cb0; color:#fff; cursor:pointer; }
   button:disabled { background:#262b35; color:#5a6270; cursor:not-allowed; }
   button.primary { background:#1f8a5b; }
+  button.alt { background:#3a4250; }
   label { display:block; font-size:13px; color:#9fb3c8; margin:10px 0 4px; }
   input, select { width:100%; font-size:15px; padding:10px; border:1px solid #2c3340;
                   border-radius:8px; background:#0d1016; color:#e6e8ec; }
-  .hint { font-size:11.5px; color:#8a919e; margin-top:4px; }
+  .hint { font-size:11.5px; color:#8a919e; margin-top:4px; line-height:1.6; }
+  .warn { color:#e5a50a; }
   #state { font-size:13px; color:#8a919e; min-height:18px; margin-top:8px; }
   #state.ok { color:#57d68c; }
   #state.err { color:#e06c75; }
   #log { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:#8ec07c;
          white-space:pre-wrap; margin-top:8px; max-height:220px; overflow:auto; }
-  .help { font-size:12.5px; color:#8a919e; line-height:1.8; margin-top:8px; }
-  .help b { color:#d7dce3; }
 </style>
 </head>
 <body>
 
 <h1>⚙️ BikeFinder 网络配置</h1>
 <div class="sub">首次开机（或重置后）配置一次，设备记住并自动连网。<br>
-<b>需要 Android Chrome / Edge</b>；首次连接会弹<b>配对</b>请求（Just Works，无 PIN），点允许即可。</div>
+<b>需要 Android Chrome / Edge</b>；首次连接会弹<b>配对</b>请求（Just Works，无 PIN），点允许即可。<br>
+<span class="warn">保存后设备会立即重启 → 蓝牙断开是正常现象，不是错误。</span></div>
 
 <section>
   <h2>① 连接设备</h2>
@@ -47,9 +48,11 @@
   <h2>② 选择地区与账号</h2>
   <label>地区方案</label>
   <select id="region">
-    <option value="PKU">北京大学 · PKU Secure（学号 + 校园网密码）</option>
-    <option value="THU" selected>清华大学 · Tsinghua-Secure（NetID + 802.1x 专用密码）</option>
-    <option value="PSK">自定义普通 WiFi（SSID + 密码）</option>
+    <option value="PKU">北京大学 · PKU Secure</option>
+    <option value="THU" selected>清华大学 · Tsinghua-Secure</option>
+    <option value="THU4">清华大学 · Tsinghua-IPv4（开放）</option>
+    <option value="EDU">eduroam（跨校漫游）</option>
+    <option value="PSK">自定义普通 WiFi</option>
   </select>
 
   <div id="ssidBox" style="display:none">
@@ -59,12 +62,14 @@
 
   <div id="userBox">
     <label>用户名</label>
-    <input id="user" placeholder="学号 / NetID">
+    <input id="user" placeholder="学号 / NetID / 学号@学校域">
     <div class="hint" id="userHint"></div>
   </div>
 
-  <label>密码</label>
-  <input id="pass" type="password" placeholder="802.1x 密码 / WiFi 密码">
+  <div id="passBox">
+    <label>密码</label>
+    <input id="pass" type="password" placeholder="802.1x 密码 / WiFi 密码">
+  </div>
   <div class="hint" id="note"></div>
 
   <div style="margin-top:14px">
@@ -86,34 +91,42 @@ const R   = '6e400012-b5a3-f393-e0a9-e50e24dcca9e';
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-let w, r;
+let dev = null, server = null, w = null, r = null;
 
+// 各方案的提示与需要填写的字段
 const HINTS = {
-  PKU: { user: '学号/工号', note: '密码 = 校园网账号密码（IAAA）' },
-  THU: { user: 'NetID（学号）', note: '⚠️ 802.1x 密码需在 user.tsinghua.edu.cn 单独注册，不是普通上网密码' },
-  PSK: { user: '', note: '普通路由器：输入 SSID 和 WiFi 密码' }
+  PKU:  { ssid:false, user:true,  pass:true,  uh:'学号/工号',
+          note:'密码 = 校园网账号密码（IAAA）' },
+  THU:  { ssid:false, user:true,  pass:true,  uh:'NetID（学号）',
+          note:'<span class="warn">802.1x 密码需在 user.tsinghua.edu.cn 单独注册，不是普通上网密码</span>' },
+  THU4: { ssid:false, user:false, pass:false, uh:'',
+          note:'开放网络，连接无需密码。注意：部分 portal 会隔离未认证设备，'
+             + '若之后手机打不开设备页面，说明需要在设备侧补 portal 登录（待实现）' },
+  EDU:  { ssid:false, user:true,  pass:true,  uh:'学号@学校域（如 学号@pku.edu.cn）',
+          note:'用户名<b>必须带 @域</b>；密码用本校 802.1x/账号密码。'
+             + '可在任何参与 eduroam 的高校使用（跨校漫游）' },
+  PSK:  { ssid:true,  user:false, pass:true,  uh:'',
+          note:'普通路由器：输入 SSID 和 WiFi 密码' }
 };
 
 function log(s) { $('log').textContent += '\n' + s; $('log').scrollTop = 9e9; }
 function setState(t, cls) { const el = $('state'); el.textContent = t; el.className = cls || ''; }
 
-// 地区切换 → 显示/隐藏 SSID 框 + 更新提示
 function applyRegion() {
-  const k = $('region').value;
-  $('ssidBox').style.display = (k === 'PSK') ? 'block' : 'none';
-  $('userBox').style.display  = (k === 'PSK') ? 'none'  : 'block';
-  $('userHint').textContent = HINTS[k].user;
-  $('note').textContent = HINTS[k].note;
+  const h = HINTS[$('region').value];
+  $('ssidBox').style.display = h.ssid ? 'block' : 'none';
+  $('userBox').style.display = h.user ? 'block' : 'none';
+  $('passBox').style.display = h.pass ? 'block' : 'none';
+  $('userHint').textContent = h.uh;
+  $('note').innerHTML = h.note;
 }
 $('region').onchange = applyRegion;
 applyRegion();
 
 // 环境自检
 (function () {
-  if (!window.isSecureContext)
-    log('!!! 非安全上下文：需要 https://（GitHub Pages）');
-  if (!navigator.bluetooth)
-    log('!!! 此浏览器不支持 Web Bluetooth → 用 Android Chrome/Edge');
+  if (!window.isSecureContext) log('!!! 非安全上下文：需要 https://（GitHub Pages）');
+  if (!navigator.bluetooth)   log('!!! 此浏览器不支持 Web Bluetooth → 用 Android Chrome/Edge');
 })();
 
 // ① 连接（首次 GATT 操作会自动触发配对）
@@ -121,16 +134,16 @@ $('btnConn').onclick = async () => {
   try {
     $('btnConn').disabled = true;
     setState('正在扫描 BikeFinder-Config ...');
-    const dev = await navigator.bluetooth.requestDevice({
+    dev = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: 'BikeFinder-Config' }],
       optionalServices: [SVC]
     });
     log('已选择: ' + dev.name);
-    const server = await dev.gatt.connect();
+    server = await dev.gatt.connect();
     const svc = await server.getPrimaryService(SVC);
     w = await svc.getCharacteristic(W);
     r = await svc.getCharacteristic(R);
-    setState('已连接（已配对？读状态验证）', 'ok');
+    setState('已连接（若弹配对，请允许）', 'ok');
     $('btnSave').disabled = false;
     refresh();
   } catch (e) {
@@ -149,30 +162,51 @@ async function refresh() {
 }
 $('btnRef').onclick = refresh;
 
+// 写入（断线自动重连一次）
+async function safeWrite(cmd) {
+  if (!dev || !dev.gatt.connected) {
+    log('蓝牙已断开，尝试重连…');
+    try { server = await dev.gatt.connect(); }
+    catch (e) { throw new Error('无法重连，请点"连接设备"重来'); }
+  }
+  try {
+    await w.writeValue(enc.encode(cmd));
+  } catch (e) {
+    try { server = await dev.gatt.connect(); await w.writeValue(enc.encode(cmd)); }
+    catch (e2) { throw new Error('写入失败（蓝牙断开）：' + e2.message); }
+  }
+}
+
 // ② 保存
 $('btnSave').onclick = async () => {
   if (!w) return;
   const region = $('region').value;
+  const h = HINTS[region];
   const ssid = $('ssid').value.trim();
   const user = $('user').value.trim();
   const pass = $('pass').value;
-  if (region === 'PSK' && !ssid) { log('! PSK 需要 SSID'); return; }
-  if (!user && region !== 'PSK') { log('! 需要用户名'); return; }
-  if (!pass) { log('! 需要密码'); return; }
+
+  if (h.ssid && !ssid) { log('! 需要 SSID'); return; }
+  if (h.user && !user) { log('! 需要用户名'); return; }
+  if (h.pass && !pass) { log('! 需要密码'); return; }
+  if (region === 'EDU' && user && user.indexOf('@') < 0) {
+    if (!confirm('eduroam 用户名通常要带 @学校域（如 学号@pku.edu.cn）。\n你输入的用户名没有 @，仍要继续？')) return;
+  }
 
   try {
     $('btnSave').disabled = true;
-    await w.writeValue(enc.encode('REGION=' + region));
-    if (ssid)  await w.writeValue(enc.encode('SSID=' + ssid));
-    if (user)  await w.writeValue(enc.encode('USER=' + user));
-    await w.writeValue(enc.encode('PASS=' + pass));
-    await w.writeValue(enc.encode('SAVE'));
-    await refresh();
-    setState('已发送保存命令，设备重启中…', 'ok');
-    log('设备将重启并连网；之后手机连校园网访问 bikefinder.local 即可');
+    await safeWrite('REGION=' + region);
+    if (h.ssid) await safeWrite('SSID=' + ssid);
+    if (h.user) await safeWrite('USER=' + user);
+    if (h.pass) await safeWrite('PASS=' + pass);
+    await safeWrite('SAVE');
+    // ★ SAVE 后设备会在 ~1 秒内重启：随后的读取必然断开，属正常
+    setState('✅ 已保存！设备重启中（蓝牙断开是正常现象）', 'ok');
+    log('配置已写入。设备重启后将自动连网；\n之后手机连同一校园网访问 http://bikefinder.local/');
+    try { await refresh(); } catch (e) { /* 预期：设备已重启 */ }
   } catch (e) {
-    log('写入失败（配对？）: ' + e.message);
-    setState('写入失败：请确认已配对', 'err');
+    log('✗ ' + e.message);
+    setState('失败：' + e.message + '（点"连接设备"重试）', 'err');
     $('btnSave').disabled = false;
   }
 };
