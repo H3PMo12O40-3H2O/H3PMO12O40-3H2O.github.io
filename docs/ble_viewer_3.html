@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BikeFinder 找车</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:#0f1115; color:#e6e8ec;
+         font-family:system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif;
+         max-width:520px; margin:0 auto; }
+  h1 { font-size:22px; margin:4px 0 2px; }
+  .sub { font-size:12.5px; color:#8a919e; margin-bottom:14px; line-height:1.6; }
+  section { background:#171a21; border-radius:14px; padding:14px; margin-bottom:12px; }
+  section h2 { font-size:14px; margin:0 0 10px; color:#9fb3c8; font-weight:600; }
+  button { font-size:15px; padding:12px 14px; margin:3px; border:0; border-radius:10px;
+           background:#2b6cb0; color:#fff; cursor:pointer; min-width:88px; }
+  button:disabled { background:#262b35; color:#5a6270; cursor:not-allowed; }
+  button.primary { background:#1f8a5b; }
+  button.alt { background:#3a4250; }
+  #state { font-size:13px; color:#8a919e; min-height:18px; margin-top:8px; }
+  #state.ok { color:#57d68c; }
+  #state.err { color:#e06c75; }
+  #locState { font-size:12.5px; color:#8a919e; margin-top:8px; line-height:1.7; }
+  #locState a { color:#57a6f5; }
+  #locList { font-size:12px; color:#8a919e; line-height:1.8; margin-top:8px; }
+  #locList .row { display:flex; justify-content:space-between; gap:8px;
+                  border-top:1px solid #232833; padding:2px 0; }
+  #locList .row a { color:#57a6f5; white-space:nowrap; }
+  #img { width:100%; border-radius:10px; background:#000; display:none; }
+  #dl { display:none; margin-top:10px; }
+  #dl a { color:#57a6f5; font-size:14px; text-decoration:none; }
+  details { background:#171a21; border-radius:14px; padding:12px 14px; margin-bottom:12px; }
+  summary { font-size:13.5px; color:#9fb3c8; cursor:pointer; }
+  .check { font-size:12px; color:#8a919e; line-height:1.8; margin-top:8px; text-align:left; }
+  .check b { color:#e6e8ec; }
+  #log { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:#8ec07c;
+         white-space:pre-wrap; text-align:left; margin-top:8px; max-height:200px; overflow:auto; }
+  .help { font-size:12.5px; color:#8a919e; line-height:1.8; margin-top:8px; }
+  .help b { color:#d7dce3; }
+  .warn { color:#e5a50a; }
+</style>
+</head>
+<body>
+
+<h1>🚲 BikeFinder 找车</h1>
+<div class="sub">靠近自行车 → 连接 → 拍一张，确认"就是我的车"；找到后亮灯 + 蜂鸣。<br>
+手机不用连 ESP32 的热点，全部走蓝牙。</div>
+
+<section>
+  <h2>① 连接</h2>
+  <button id="btnConn" class="primary">连接 BikeFinder</button>
+  <button id="btnAll" class="alt">显示全部设备</button>
+  <div id="state">未连接</div>
+  <div class="check">
+    ⚠️ 列表里没有 BikeFinder 时依次检查：<br>
+    ① 手机<b>定位服务</b>已开启（安卓蓝牙扫描强制要求定位权限，关着就扫不到任何设备）<br>
+    ② nRF Connect 等 App 已<b>断开</b>（BLE 一次只能连一个终端，被占用时停止广播）<br>
+    ③ 车锁<b>已通电</b>且固件在运行
+  </div>
+</section>
+
+<section>
+  <h2>② 拍照确认</h2>
+  <button id="b320" disabled>QVGA · 最快</button>
+  <button id="b640" disabled>VGA · 推荐</button>
+  <button id="b800" disabled>SVGA · 清晰</button>
+  <div id="prog"></div>
+</section>
+
+<section>
+  <h2>③ 找到车了</h2>
+  <button id="bW" disabled>💡 亮灯</button>
+  <button id="bB" disabled>🔔 蜂鸣</button>
+</section>
+
+<section>
+  <h2>④ 位置记录（存在手机里）</h2>
+  <div id="locState">连接后自动记录 GPS 轨迹到本机（关页面不丢），找车时直接看这里。</div>
+  <button id="bLoc" disabled>⏸ 暂停记录</button>
+  <button id="bLocCsv" class="alt" disabled>⬇ 导出 CSV</button>
+  <button id="bLocClear" class="alt" disabled>清空</button>
+  <button id="bLocRead" class="alt" disabled>读回固件位置</button>
+  <div style="font-size:12px;color:#8a919e;margin-top:8px">
+    地图:
+    <select id="bLocMap" style="background:#262b35;color:#e6e8ec;border:1px solid #3a4250;border-radius:6px;padding:2px 4px">
+      <option value="amap">高德</option>
+      <option value="baidu">百度</option>
+    </select>
+    　<label><input type="checkbox" id="bLocHiAcc" checked> 高精度 GPS</label>
+  </div>
+  <label style="font-size:12px;color:#8a919e;display:block;margin-top:8px">
+    <input type="checkbox" id="bLocFw" checked> 同时把最新位置写一份到固件（冗余备份，断电不丢）
+  </label>
+  <div id="locList"></div>
+</section>
+
+<img id="img" alt="照片">
+<div id="dl"><a download="bikefinder.jpg">⬇ 保存原图</a></div>
+
+<details>
+  <summary>运行日志</summary>
+  <div id="log"></div>
+  <button id="btnCopy" class="alt">复制日志</button>
+</details>
+
+<details>
+  <summary>使用说明 / 连不上看这里</summary>
+  <div class="help">
+    <b>浏览器</b>：Android 的 <b>Chrome / Edge / 三星浏览器</b>（自带浏览器、iOS Safari 不支持）。<br>
+    <b class="warn">① 手机"定位服务"必须开启</b>——安卓的蓝牙扫描强制要求定位权限，关着就一个设备都扫不到（这是"没有兼容设备"最常见的元凶）。<br>
+    <b>页面必须 HTTPS</b>（或 localhost）才能用蓝牙：本页已放在 GitHub Pages 上，直接访问即可。<br>
+    <b>连接前</b>：先在 nRF Connect 等 App 里<b>断开</b>——BLE 设备一次只能连一个终端，被占用时这里搜不到。<br>
+    <b>速度</b>：Android 通常协商 MTU 517（约 0.5 秒一张）；Windows 可能卡在 MTU 23（约 10 秒），属正常。<br>
+    <b>提示</b>：不需要配对（pair），直接连接即可。<br>
+    <b>位置记录</b>：连接后自动把 GPS 轨迹记录在<b>手机本机</b>（关页面不丢），找车时在④区查看或导出 CSV；勾选"写固件"可做冗余备份。需要定位权限；页面要<b>保持在前台</b>（会自动申请屏幕常亮）。iOS Safari 不支持 Web Bluetooth，iPhone 需要原生 App。<br>
+    <b>地图链接</b>：默认高德，可在④区切换百度（国内可用，自动做坐标纠偏）。<br>
+    <b>GPS 超时（code=3）</b>：国内常见——网页定位走手机系统定位服务，无谷歌服务的手机（部分华为/荣耀）或谷歌网络定位被墙时会超时；排查提示会直接显示在④区。
+  </div>
+</details>
+
+<script>
+const SVC  = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CTRL = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const DATA = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const INFO = '6e400004-b5a3-f393-e0a9-e50e24dcca9e';
+const LOC  = '6e400005-b5a3-f393-e0a9-e50e24dcca9e';
+
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let ctrl, data, info, device, server, imgUrl;
+let locChar = null, locWatch = null, locOn = false, locLast = 0, wakeLock = null;
+const TRACK_KEY = 'bf.track.v1', TRACK_MAX = 1000, META_KEY = 'bf.meta.v1', PREFS_KEY = 'bf.prefs.v1';
+let track = [], trackTotal = 0, lastGpsErrLog = 0, locPrefs = { paused: false, toFw: true, map: 'amap', hiAcc: true };
+
+function log(s) {
+  $('log').textContent += '\n' + s;
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function setState(t, cls) {
+  const el = $('state');
+  el.textContent = t;
+  el.className = cls || '';
+}
+function setBusy(b) {
+  ['b320','b640','b800','bW','bB','bLoc','bLocRead'].forEach(i => $(i).disabled = b || !ctrl);
+}
+
+// ---- 环境自检 ----
+(function diagnose() {
+  const bad = [];
+  if (!window.isSecureContext)
+    bad.push('当前不是安全上下文（' + location.protocol + '）→ 蓝牙被禁用。需要 https:// 或 localhost，见"使用说明"');
+  if (!navigator.bluetooth)
+    bad.push('此浏览器没有 Web Bluetooth → 换 Android 的 Chrome / Edge / 三星浏览器');
+  if (bad.length) {
+    for (const b of bad) log('!!! ' + b);
+    $('btnConn').disabled = true;
+    setState('环境不支持', 'err');
+  } else {
+    log('环境检查通过。');
+  }
+})();
+
+// ---- ① 连接 ----
+async function doConnect(useFilter) {
+  try {
+    $('btnConn').disabled = true;
+    $('btnAll').disabled = true;
+    setState(useFilter ? '正在扫描 BikeFinder ...（列表出现前，先检查上方 ①②③）'
+                       : '列出附近全部 BLE 设备，请从中选 BikeFinder ...');
+    const opts = useFilter
+      ? { filters: [{ services: [SVC] }], optionalServices: [SVC] }   // 按服务 UUID 匹配，比按名字可靠
+      : { acceptAllDevices: true, optionalServices: [SVC] };          // 诊断用：全列出
+    device = await navigator.bluetooth.requestDevice(opts);
+    log('已选择: ' + device.name);
+    device.addEventListener('gattserverdisconnected', () => {
+      log('!! 连接断开');
+      stopLoc();
+      ctrl = data = info = null;
+      locChar = null;
+      setBusy(true);
+      $('btnConn').disabled = false;
+      $('btnAll').disabled = false;
+      $('locState').textContent = '已断开，位置数据已保存在本机。';
+      setState('已断开，点"连接"重试', 'err');
+    });
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    ctrl = await svc.getCharacteristic(CTRL);
+    data = await svc.getCharacteristic(DATA);
+    info = await svc.getCharacteristic(INFO);
+    try {
+      locChar = await svc.getCharacteristic(LOC);
+    } catch (e) {
+      log('!! 固件没有 LOC 特性（旧固件）→ 位置上报不可用，请烧最新 BikeFinder_BLE.ino');
+    }
+    setBusy(false);
+    setState('已连接：' + device.name, 'ok');
+    log('连接成功。');
+    if (!locPrefs.paused) startLoc();      // 连接即自动开始记录（存在手机）
+  } catch (e) {
+    log('连接失败: ' + e.message);
+    setState('连接失败', 'err');
+  } finally {
+    $('btnConn').disabled = false;
+    $('btnAll').disabled = false;
+  }
+}
+
+$('btnConn').onclick = () => doConnect(true);
+$('btnAll').onclick = () => doConnect(false);
+
+// ---- ② 拍照 + 拉取 ----
+async function shoot(sizeKey, label) {
+  if (!ctrl) return;
+  setBusy(true);
+  $('prog').textContent = '拍照中 ...';
+  const t0 = performance.now();
+  try {
+    await ctrl.writeValue(enc.encode('C' + sizeKey));
+
+    // 轮询 INFO：固件拍照期间 state=2，拍完 state=1
+    let total = 0, w = 0, h = 0, state = -1, maxLen = 0, mtu = 0;
+    let ok = false;
+    for (let i = 0; i < 40; i++) {
+      await sleep(150);
+      const f = dec.decode(await info.readValue()).trim().split(',');
+      state = parseInt(f[3], 10);
+      if (state === 1) { total=+f[0]; w=+f[1]; h=+f[2]; maxLen=+f[4]; mtu=+f[5]; ok = true; break; }
+      if (state === 3) throw new Error('拍照失败（固件返回 state=3）');
+    }
+    if (!ok) throw new Error('等待拍照结果超时');
+    log(label + ': ' + w + 'x' + h + ', ' + total + ' B, MTU=' + mtu + ', 历史最大 ' + maxLen + ' B');
+
+    // 逐块拉取（按实际收到长度累加，MTU 无关）
+    const parts = [];
+    let off = 0;
+    while (off < total) {
+      await ctrl.writeValue(enc.encode('O' + off));
+      const dv = await data.readValue();
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (b.length === 0) break;
+      parts.push(b);
+      off += b.length;
+      if (parts.length % 5 === 0 || off >= total)
+        $('prog').textContent = '接收中 ' + off + '/' + total + ' (' + Math.round(off*100/total) + '%)';
+    }
+    if (off < total) throw new Error('接收不完整: ' + off + '/' + total);
+
+    const out = new Uint8Array(off);
+    let p = 0;
+    for (const b of parts) { out.set(b, p); p += b.length; }
+    const isJpeg = out[0] === 0xFF && out[1] === 0xD8;
+    const ms = Math.round(performance.now() - t0);
+    log('完成: ' + ms + ' ms, ' + (off/1024/(ms/1000)).toFixed(1) + ' KB/s, JPEG ' + (isJpeg ? '✔' : '✘'));
+    if (!isJpeg) throw new Error('JPEG 头异常');
+
+    if (imgUrl) URL.revokeObjectURL(imgUrl);
+    imgUrl = URL.createObjectURL(new Blob([out], { type: 'image/jpeg' }));
+    $('img').src = imgUrl;
+    $('img').style.display = 'block';
+    $('dl').style.display = 'block';
+    $('dl').querySelector('a').href = imgUrl;
+    $('dl').querySelector('a').download = 'bikefinder_' + w + 'x' + h + '.jpg';
+    $('prog').textContent = '';
+    setState('已获取照片', 'ok');
+  } catch (e) {
+    log('✗ ' + e.message);
+    $('prog').textContent = '';
+    setState('失败：' + e.message, 'err');
+  } finally {
+    setBusy(false);
+  }
+}
+
+$('b320').onclick = () => shoot('320', 'QVGA');
+$('b640').onclick = () => shoot('640', 'VGA');
+$('b800').onclick = () => shoot('800', 'SVGA');
+
+// ---- ③ 灯 + 蜂鸣 ----
+let lightOn = false, buzzerOn = false;
+
+$('bW').onclick = async () => {
+  if (!ctrl) return;
+  lightOn = !lightOn;
+  try {
+    await ctrl.writeValue(enc.encode('W' + (lightOn ? '1' : '0')));
+    log('灯 ' + (lightOn ? '开（闪烁）' : '关'));
+  } catch (e) { log('✗ ' + e.message); lightOn = !lightOn; }
+  $('bW').textContent = lightOn ? '💡 关灯' : '💡 亮灯';
+};
+
+$('bB').onclick = async () => {
+  if (!ctrl) return;
+  buzzerOn = !buzzerOn;
+  try {
+    await ctrl.writeValue(enc.encode('B' + (buzzerOn ? '1' : '0')));
+    log('蜂鸣 ' + (buzzerOn ? '响' : '停'));
+  } catch (e) { log('✗ ' + e.message); buzzerOn = !buzzerOn; }
+  $('bB').textContent = buzzerOn ? '🔔 停止' : '🔔 蜂鸣';
+};
+
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('log').textContent); log('日志已复制'); }
+  catch (e) { log('复制失败，请手动选中'); }
+};
+
+// ---- ④ 位置记录（存在手机） ----
+// 数据模型 {t,lat,lon,acc} 与未来原生 App 保持一致，方便迁移。
+function saveTrack() {
+  try {
+    localStorage.setItem(TRACK_KEY, JSON.stringify(track));
+    localStorage.setItem(META_KEY, String(trackTotal));
+    localStorage.setItem(PREFS_KEY, JSON.stringify(locPrefs));
+  } catch (e) { log('✗ 本机保存失败: ' + e.message); }
+}
+
+// ---- 地图链接（国内）：WGS84 原始坐标 → 高德 GCJ02 / 百度 BD09 纠偏 ----
+function wgs2gcj(lat, lon) {
+  const a = 6378245.0, ee = 0.00669342162296594323, pi = Math.PI;
+  function dLat(x, y) {
+    let r = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+    r += (20*Math.sin(6*x*pi) + 20*Math.sin(2*y*pi)) * 2/3;
+    r += (20*Math.sin(y*pi) + 40*Math.sin(y*pi/3)) * 2/3;
+    r += (160*Math.sin(y*pi/12) + 320*Math.sin(y*pi/30)) * 2/3;
+    return r;
+  }
+  function dLon(x, y) {
+    let r = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+    r += (20*Math.sin(6*x*pi) + 20*Math.sin(2*x*pi)) * 2/3;
+    r += (20*Math.sin(x*pi) + 40*Math.sin(x*pi/3)) * 2/3;
+    r += (150*Math.sin(x*pi/12) + 300*Math.sin(x*pi/30)) * 2/3;
+    return r;
+  }
+  const x = lon - 105, y = lat - 35, r = pi/180;
+  const magic = 1 - ee*Math.pow(Math.sin(lat*r), 2);
+  const s = Math.sqrt(magic);
+  return [
+    lat + dLat(x, y)*180 / ((a*(1-ee))/(magic*s)*pi),
+    lon + dLon(x, y)*180 / (a/s*Math.cos(lat*r)*pi)
+  ];
+}
+function mapUrl(p) {
+  const g = wgs2gcj(p.lat, p.lon);              // [gcjLat, gcjLon]
+  if (locPrefs.map === 'baidu') {
+    const xp = Math.PI*3000/180, x = g[1], y = g[0];
+    const z  = Math.sqrt(x*x + y*y) + 0.00002*Math.sin(y*xp);
+    const th = Math.atan2(y, x) + 0.000003*Math.cos(x*xp);
+    const blon = z*Math.cos(th) + 0.0065, blat = z*Math.sin(th) + 0.006;
+    return 'https://api.map.baidu.com/marker?location=' + blat.toFixed(6) + ',' + blon.toFixed(6)
+         + '&title=BikeFinder&content=BikeFinder&output=html';
+  }
+  return 'https://uri.amap.com/marker?position=' + g[1].toFixed(6) + ',' + g[0].toFixed(6)
+       + '&name=BikeFinder&src=bikefinder&callnative=1';
+}
+
+function renderTrack() {
+  const n = track.length;
+  if (locOn) {
+    $('locState').innerHTML = '正在记录：本机已存 <b>' + n + '</b> 点'
+      + (trackTotal > n ? '（历史累计 ' + trackTotal + ' 点）' : '');
+  } else {
+    $('locState').innerHTML = n
+      ? '已保存 <b>' + n + '</b> 个位置点' + (trackTotal > n ? '（历史累计 ' + trackTotal + ' 点）' : '')
+        + '。连接后自动继续记录。'
+      : '尚未记录任何位置。连接 BikeFinder 后自动开始记录。';
+  }
+  if (n) {
+    const p = track[n - 1];
+    $('locState').innerHTML += '<br>最近: ' + p.lat.toFixed(6) + ', ' + p.lon.toFixed(6)
+      + ' · 精度 ±' + p.acc + ' m · ' + new Date(p.t * 1000).toLocaleString()
+      + '　<a href="' + mapUrl(p) + '" target="_blank">地图</a>';
+  }
+  $('bLocCsv').disabled = n === 0;
+  $('bLocClear').disabled = n === 0;
+  $('bLoc').textContent = locOn ? '⏸ 暂停记录' : '▶ 继续记录';
+  $('bLoc').disabled = !ctrl;                 // 只在连接（在范围内）时记录
+  const rows = track.slice(-8).reverse();     // 最近 8 条，新的在上
+  $('locList').innerHTML = rows.map(p =>
+    '<div class="row"><span>' + new Date(p.t * 1000).toLocaleString() + '　'
+    + p.lat.toFixed(6) + ', ' + p.lon.toFixed(6) + ' ±' + p.acc + 'm</span>'
+    + '<a href="' + mapUrl(p) + '" target="_blank">地图</a></div>'
+  ).join('');
+}
+
+// 启动时载入本机已存数据
+(function loadLocal() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TRACK_KEY) || '[]');
+    if (Array.isArray(t)) track = t.filter(p => p && typeof p.t === 'number'
+                                               && typeof p.lat === 'number'
+                                               && typeof p.lon === 'number');
+    trackTotal = parseInt(localStorage.getItem(META_KEY) || '0', 10) || track.length;
+    const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+    if (typeof p.paused === 'boolean') locPrefs.paused = p.paused;
+    if (typeof p.toFw === 'boolean')   locPrefs.toFw = p.toFw;
+    if (p.map === 'baidu')             locPrefs.map = 'baidu';
+    if (typeof p.hiAcc === 'boolean')  locPrefs.hiAcc = p.hiAcc;
+  } catch (e) {}
+  $('bLocFw').checked = locPrefs.toFw;
+  $('bLocMap').value = locPrefs.map;
+  $('bLocHiAcc').checked = locPrefs.hiAcc;
+  renderTrack();
+  log('本机已有 ' + track.length + ' 个位置点' + (trackTotal > track.length ? '（累计 ' + trackTotal + '）' : '') + '。');
+})();
+
+function stopLoc() {
+  locOn = false;
+  if (locWatch) { navigator.geolocation.clearWatch(locWatch); locWatch = null; }
+  if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+  renderTrack();
+}
+
+function beginWatch() {
+  // maximumAge 30s：允许复用缓存定位（刚定位过就不必再等冷启动）；
+  // timeout 60s：室内/窗边卫星冷启动可达 1 分钟，20s 太短。
+  locWatch = navigator.geolocation.watchPosition(
+    p => onLoc(p),
+    e => {
+      const now = Date.now();
+      if (now - lastGpsErrLog > 60000) {        // 错误提示限流：1 分钟最多一次
+        lastGpsErrLog = now;
+        log('GPS 错误 code=' + e.code + ' ' + e.message);
+        if (e.code === 3) {
+          $('locState').innerHTML =
+            'GPS 定位超时（code=3）。<br>'
+            + '网页定位走手机系统定位服务，国内手机常见原因：<br>'
+            + '<b>①</b> 设置→定位 打开"高精度"模式；Chrome 权限选"精确位置"、电池优化设为不限制；<br>'
+            + '<b>②</b> 取消上方"高精度 GPS"勾选，改用网络定位重试；<br>'
+            + '<b>③</b> 手机无谷歌服务（部分华为/荣耀机型）时网页定位不可用 → 只能等原生 App（高德/百度定位 SDK）。';
+        }
+      }
+    },
+    { enableHighAccuracy: locPrefs.hiAcc, maximumAge: 30000, timeout: 60000 });
+}
+
+function startLoc() {
+  if (locOn || !ctrl) return;
+  if (!navigator.geolocation) { log('此浏览器不支持定位 API'); return; }
+  locOn = true; locLast = 0;
+  renderTrack();
+  try { wakeLock = navigator.wakeLock.request('screen'); } catch (e) {}
+  beginWatch();
+}
+
+$('bLoc').onclick = () => {
+  if (!ctrl) return;
+  if (locOn) {
+    locPrefs.paused = true; saveTrack(); stopLoc();
+    log('已暂停记录（数据已保存）');
+  } else {
+    locPrefs.paused = false; saveTrack(); startLoc();
+    log('继续记录位置到本机');
+  }
+};
+
+async function onLoc(pos) {
+  if (!locOn || !ctrl) return;
+  const now = Date.now();
+  if (now - locLast < 2000) return;             // 限流：最多每 2 秒记一点
+  locLast = now;
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  const acc = Math.round(pos.coords.accuracy || 0);
+  const t = Math.floor(pos.timestamp / 1000);
+  track.push({ t, lat, lon, acc });
+  trackTotal++;
+  if (track.length > TRACK_MAX) track = track.slice(-TRACK_MAX);
+  saveTrack();
+  renderTrack();
+  // 可选：把最新位置写一份到固件（冗余备份）
+  if (locPrefs.toFw && locChar) {
+    const msg = lat.toFixed(5) + ',' + lon.toFixed(5) + ',' + acc + ',' + t;
+    try {
+      // 用带应答的写：MTU 小（如桌面 Chrome=23）时也能靠长写完整送达
+      if (locChar.writeValueWithResponse) await locChar.writeValueWithResponse(enc.encode(msg));
+      else await locChar.writeValue(enc.encode(msg));
+    } catch (e) { log('✗ 固件冗余写入失败: ' + e.message); }
+  }
+  if (trackTotal <= 5 || trackTotal % 10 === 0)
+    log('↗ #' + trackTotal + ' ' + lat.toFixed(5) + ',' + lon.toFixed(5));
+}
+
+$('bLocFw').onchange = () => { locPrefs.toFw = $('bLocFw').checked; saveTrack(); };
+
+$('bLocMap').onchange = () => { locPrefs.map = $('bLocMap').value; saveTrack(); renderTrack(); };
+
+$('bLocHiAcc').onchange = () => {
+  locPrefs.hiAcc = $('bLocHiAcc').checked; saveTrack();
+  if (locOn) { navigator.geolocation.clearWatch(locWatch); locWatch = null; beginWatch(); }
+};
+
+$('bLocCsv').onclick = () => {
+  if (!track.length) return;
+  const lines = ['time,lat,lon,acc_m'];
+  for (const p of track)
+    lines.push([new Date(p.t * 1000).toISOString(), p.lat.toFixed(6), p.lon.toFixed(6), p.acc].join(','));
+  const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bikefinder_track_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('已导出 ' + track.length + ' 点 CSV');
+};
+
+$('bLocClear').onclick = () => {
+  if (!track.length) return;
+  if (!confirm('清空本机保存的全部位置记录（' + track.length + ' 点）？')) return;
+  track = []; trackTotal = 0;
+  saveTrack(); renderTrack();
+  log('已清空本机位置记录');
+};
+
+$('bLocRead').onclick = async () => {
+  if (!info) return;
+  try {
+    const f = dec.decode(await info.readValue()).trim().split(',');
+    if (f.length < 11 || isNaN(parseFloat(f[8])) || parseFloat(f[8]) < 0) {
+      $('locState').textContent = '固件里还没有已存位置（尚未上报过）。';
+      return;
+    }
+    const lat = parseFloat(f[6]), lon = parseFloat(f[7]);
+    const acc = Math.round(parseFloat(f[8]));
+    const t = parseInt(f[9], 10), n = parseInt(f[10], 10);
+    $('locState').innerHTML =
+      '固件已存位置（累计 <b>' + n + '</b> 次）：<br>' + lat.toFixed(6) + ', ' + lon.toFixed(6)
+      + ' · 精度 ±' + acc + ' m' + (t ? ' · ' + new Date(t * 1000).toLocaleString() : '')
+      + '　<a href="' + mapUrl({ lat, lon, acc, t }) + '" target="_blank">地图</a>';
+    log('读回固件位置: ' + lat + ',' + lon + ' acc=' + acc + ' t=' + t + ' n=' + n);
+  } catch (e) { log('✗ 读取失败: ' + e.message); }
+};
+
+// 页面从后台切回时重新拿屏幕常亮锁
+document.addEventListener('visibilitychange', async () => {
+  if (locOn && document.visibilityState === 'visible' && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+});
+</script>
+
+</body>
+</html>
